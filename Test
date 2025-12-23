@@ -1,0 +1,324 @@
+import java.time.LocalDate;
+import java.time.DayOfWeek;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+enum Shift {
+    A, D, P
+}
+
+class Employee {
+    int id;
+    List<Shift> preferenceSequence; // 倾向序列
+    Shift recommended;              // 本周推荐班次
+    Shift assigned;                 // 本周分配班次
+
+    public Employee(int id, String prefStr) {
+        this.id = id;
+        preferenceSequence = new ArrayList<>();
+        String[] parts = prefStr.split("\\+");
+        for (String part : parts) {
+            switch (part.trim()) {
+                case "A": preferenceSequence.add(Shift.A); break;
+                case "D": preferenceSequence.add(Shift.D); break;
+                case "P": preferenceSequence.add(Shift.P); break;
+                default: throw new IllegalArgumentException("Invalid shift: " + part);
+            }
+        }
+    }
+
+    public void calculateRecommended(int week) {
+        int index = (week - 1) % preferenceSequence.size();
+        recommended = preferenceSequence.get(index);
+    }
+}
+
+class DaySchedule {
+    LocalDate date;
+    DayOfWeek dayOfWeek;
+    boolean isWorkday;  // 是否为工作日
+    boolean isWeekend;  // 是否为周末
+    
+    public DaySchedule(LocalDate date) {
+        this.date = date;
+        this.dayOfWeek = date.getDayOfWeek();
+        this.isWeekend = (dayOfWeek == DayOfWeek.SATURDAY || dayOfWeek == DayOfWeek.SUNDAY);
+        this.isWorkday = !isWeekend;
+    }
+}
+
+public class MonthlyScheduling {
+    private static final int MIN_A = 3;
+    private static final int MAX_A = 4;
+    private static final int MIN_P = 4;
+    private static final int MAX_P = 5;
+    private List<Employee> employees;
+    
+    public static void main(String[] args) {
+        MonthlyScheduling scheduling = new MonthlyScheduling();
+        scheduling.run();
+    }
+
+    public void run() {
+        initEmployees();
+        generateScheduleForMonth(2026, 1);
+    }
+
+    private void initEmployees() {
+        employees = new ArrayList<>();
+        String[] prefStrings = {
+            "A+D",   // 员工1
+            "A+D",   // 员工2
+            "A+D",   // 员工3
+            "D+A",   // 员工4
+            "D",     // 员工5
+            "D+A",   // 员工6
+            "D",     // 员工7
+            "D+P",   // 员工8
+            "P+D+A", // 员工9
+            "A+P+D", // 员工10
+            "D+A",   // 员工11
+            "D+P+A", // 员工12
+            "D+A+P", // 员工13
+            "P",     // 员工14
+            "P"      // 员工15
+        };
+        for (int i = 0; i < prefStrings.length; i++) {
+            employees.add(new Employee(i + 1, prefStrings[i]));
+        }
+    }
+
+    private void generateScheduleForMonth(int year, int month) {
+        // 获取该月所有日期
+        List<DaySchedule> monthDays = getMonthDays(year, month);
+        
+        // 按周分组
+        Map<Integer, List<DaySchedule>> weeks = groupByWeek(monthDays);
+        
+        // 为每一周生成排班表
+        Map<Integer, Shift[]> weeklySchedules = new HashMap<>();
+        
+        for (Map.Entry<Integer, List<DaySchedule>> entry : weeks.entrySet()) {
+            int weekNum = entry.getKey();
+            List<DaySchedule> weekDays = entry.getValue();
+            
+            // 为本周生成排班
+            Shift[] weekSchedule = generateWeekSchedule(weekNum);
+            weeklySchedules.put(weekNum, weekSchedule);
+            
+            System.out.println("\n第" + weekNum + "周排班安排：");
+            for (int i = 0; i < employees.size(); i++) {
+                System.out.printf("员工%2d: %s%n", employees.get(i).id, weekSchedule[i]);
+            }
+        }
+        
+        // 生成完整月排班表
+        printMonthlySchedule(monthDays, weeklySchedules, year, month);
+    }
+    
+    private List<DaySchedule> getMonthDays(int year, int month) {
+        List<DaySchedule> days = new ArrayList<>();
+        LocalDate date = LocalDate.of(year, month, 1);
+        int daysInMonth = date.lengthOfMonth();
+        
+        for (int day = 1; day <= daysInMonth; day++) {
+            LocalDate currentDate = LocalDate.of(year, month, day);
+            days.add(new DaySchedule(currentDate));
+        }
+        
+        return days;
+    }
+    
+    private Map<Integer, List<DaySchedule>> groupByWeek(List<DaySchedule> monthDays) {
+        Map<Integer, List<DaySchedule>> weeks = new TreeMap<>();
+        
+        for (DaySchedule day : monthDays) {
+            // 计算该日期所在的周数（从1开始）
+            int weekNum = (day.date.getDayOfMonth() - 1) / 7 + 1;
+            
+            if (!weeks.containsKey(weekNum)) {
+                weeks.put(weekNum, new ArrayList<>());
+            }
+            weeks.get(weekNum).add(day);
+        }
+        
+        return weeks;
+    }
+    
+    private Shift[] generateWeekSchedule(int week) {
+        Shift[] weekSchedule = new Shift[employees.size()];
+        
+        // 计算每个员工的本周推荐班次
+        for (Employee emp : employees) {
+            emp.calculateRecommended(week);
+        }
+        
+        // 生成满足条件的排班
+        if (findSchedule(week)) {
+            for (int i = 0; i < employees.size(); i++) {
+                weekSchedule[i] = employees.get(i).assigned;
+            }
+        } else {
+            // 如果找不到合适方案，使用推荐班次
+            for (int i = 0; i < employees.size(); i++) {
+                weekSchedule[i] = employees.get(i).recommended;
+            }
+        }
+        
+        return weekSchedule;
+    }
+    
+    private boolean findSchedule(int week) {
+        // 先尝试0人调整
+        for (Employee emp : employees) {
+            emp.assigned = emp.recommended;
+        }
+        if (checkCondition()) {
+            return true;
+        }
+        
+        // 迭代加深搜索
+        for (int maxChanges = 1; maxChanges <= employees.size(); maxChanges++) {
+            if (dfs(0, 0, maxChanges, 0, 0)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    private boolean checkCondition() {
+        int countA = 0, countP = 0;
+        for (Employee emp : employees) {
+            Shift s = emp.assigned;
+            if (s == Shift.A) countA++;
+            else if (s == Shift.P) countP++;
+        }
+        return countA >= MIN_A && countA <= MAX_A && countP >= MIN_P && countP <= MAX_P;
+    }
+    
+    private boolean dfs(int index, int changes, int maxChanges, int currentA, int currentP) {
+        if (changes > maxChanges) return false;
+        if (index == employees.size()) {
+            return currentA >= MIN_A && currentA <= MAX_A && currentP >= MIN_P && currentP <= MAX_P;
+        }
+        Employee emp = employees.get(index);
+        
+        for (Shift shift : emp.preferenceSequence) {
+            int newChanges = changes;
+            if (shift != emp.recommended) {
+                newChanges = changes + 1;
+                if (newChanges > maxChanges) continue;
+            }
+            int newA = currentA;
+            int newP = currentP;
+            if (shift == Shift.A) newA++;
+            else if (shift == Shift.P) newP++;
+            
+            // 剪枝
+            if (newA > MAX_A || newP > MAX_P) continue;
+            int remaining = employees.size() - index - 1;
+            if (newA + remaining < MIN_A || newP + remaining < MIN_P) continue;
+            
+            emp.assigned = shift;
+            if (dfs(index + 1, newChanges, maxChanges, newA, newP)) {
+                return true;
+            }
+        }
+        emp.assigned = null; // 回溯
+        return false;
+    }
+    
+    private void printMonthlySchedule(List<DaySchedule> monthDays, 
+                                     Map<Integer, Shift[]> weeklySchedules, 
+                                     int year, int month) {
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        
+        System.out.println("\n\n" + year + "年" + month + "月排班表");
+        System.out.println("=".repeat(120));
+        
+        // 打印表头
+        System.out.print("员工编号\t");
+        for (DaySchedule day : monthDays) {
+            String dayOfWeekStr = getChineseDayOfWeek(day.dayOfWeek);
+            System.out.printf("%s\n%s\t", day.date.format(formatter), dayOfWeekStr);
+        }
+        System.out.println();
+        
+        // 打印每个员工的排班
+        for (int i = 0; i < employees.size(); i++) {
+            System.out.printf("员工%2d\t", employees.get(i).id);
+            
+            for (DaySchedule day : monthDays) {
+                int weekNum = (day.date.getDayOfMonth() - 1) / 7 + 1;
+                Shift[] weekSchedule = weeklySchedules.get(weekNum);
+                
+                if (day.isWeekend) {
+                    System.out.print("休\t\t");
+                } else {
+                    System.out.print(weekSchedule[i] + "\t\t");
+                }
+            }
+            System.out.println();
+        }
+        
+        // 打印每日统计
+        System.out.println("\n\n每日班次统计");
+        System.out.println("=".repeat(120));
+        System.out.print("日期\t\t");
+        for (DaySchedule day : monthDays) {
+            if (!day.isWeekend) {
+                System.out.printf("%s\t", day.date.format(DateTimeFormatter.ofPattern("MM-dd")));
+            }
+        }
+        
+        System.out.print("\nA班人数\t");
+        for (DaySchedule day : monthDays) {
+            if (!day.isWeekend) {
+                int weekNum = (day.date.getDayOfMonth() - 1) / 7 + 1;
+                int countA = countShifts(weeklySchedules.get(weekNum), Shift.A);
+                System.out.printf("%d\t\t", countA);
+            }
+        }
+        
+        System.out.print("\nD班人数\t");
+        for (DaySchedule day : monthDays) {
+            if (!day.isWeekend) {
+                int weekNum = (day.date.getDayOfMonth() - 1) / 7 + 1;
+                int countD = countShifts(weeklySchedules.get(weekNum), Shift.D);
+                System.out.printf("%d\t\t", countD);
+            }
+        }
+        
+        System.out.print("\nP班人数\t");
+        for (DaySchedule day : monthDays) {
+            if (!day.isWeekend) {
+                int weekNum = (day.date.getDayOfMonth() - 1) / 7 + 1;
+                int countP = countShifts(weeklySchedules.get(weekNum), Shift.P);
+                System.out.printf("%d\t\t", countP);
+            }
+        }
+    }
+    
+    private int countShifts(Shift[] schedule, Shift shiftType) {
+        int count = 0;
+        for (Shift shift : schedule) {
+            if (shift == shiftType) {
+                count++;
+            }
+        }
+        return count;
+    }
+    
+    private String getChineseDayOfWeek(DayOfWeek dayOfWeek) {
+        switch (dayOfWeek) {
+            case MONDAY:    return "周一";
+            case TUESDAY:   return "周二";
+            case WEDNESDAY: return "周三";
+            case THURSDAY:  return "周四";
+            case FRIDAY:    return "周五";
+            case SATURDAY:  return "周六";
+            case SUNDAY:    return "周日";
+            default:        return "";
+        }
+    }
+}
