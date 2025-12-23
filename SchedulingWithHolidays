@@ -1,0 +1,682 @@
+import java.time.LocalDate;
+import java.time.DayOfWeek;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+// 班次枚举，增加PH表示节假日
+enum ShiftType {
+    A, D, P, PH, REST
+}
+
+// 节假日数据类
+class Holiday {
+    String name;
+    LocalDate date;
+    
+    public Holiday(String name, LocalDate date) {
+        this.name = name;
+        this.date = date;
+    }
+}
+
+// 员工类
+class Employee {
+    int id;
+    String name;
+    String[] shiftPattern;
+    Map<ShiftType, Integer> shiftWeights = new HashMap<>();
+    
+    public Employee(int id, String name, String pattern) {
+        this.id = id;
+        this.name = name;
+        this.shiftPattern = pattern.split("\\+");
+        
+        for (int i = 0; i < shiftPattern.length; i++) {
+            ShiftType shift = ShiftType.valueOf(shiftPattern[i]);
+            shiftWeights.put(shift, 10 - i * 2);
+        }
+    }
+    
+    public ShiftType getRecommendedShift(int week) {
+        int index = (week - 1) % shiftPattern.length;
+        return ShiftType.valueOf(shiftPattern[index]);
+    }
+}
+
+// 日期规则类
+class DateRule {
+    int employeeId;
+    ShiftType requiredShift;
+    String ruleType;
+    String ruleValue;
+    int priority;
+    
+    public DateRule(int employeeId, ShiftType requiredShift, 
+                    String ruleType, String ruleValue, int priority) {
+        this.employeeId = employeeId;
+        this.requiredShift = requiredShift;
+        this.ruleType = ruleType;
+        this.ruleValue = ruleValue;
+        this.priority = priority;
+    }
+    
+    public boolean matches(LocalDate date, int weekOfMonth) {
+        switch (ruleType) {
+            case "WEEKDAY":
+                String[] weekdays = ruleValue.split(",");
+                DayOfWeek dateDay = date.getDayOfWeek();
+                for (String weekday : weekdays) {
+                    if (getDayOfWeek(weekday) == dateDay) {
+                        return true;
+                    }
+                }
+                return false;
+                
+            case "DATE_RANGE":
+                String[] dates = ruleValue.split(":");
+                if (dates.length == 2) {
+                    LocalDate start = LocalDate.parse(dates[0]);
+                    LocalDate end = LocalDate.parse(dates[1]);
+                    return !date.isBefore(start) && !date.isAfter(end);
+                }
+                return false;
+                
+            case "SPECIFIC_DATE":
+                String[] specificDates = ruleValue.split(",");
+                for (String specificDate : specificDates) {
+                    if (date.equals(LocalDate.parse(specificDate))) {
+                        return true;
+                    }
+                }
+                return false;
+                
+            case "WEEK_OF_MONTH":
+                String[] weekAndDay = ruleValue.split(":");
+                if (weekAndDay.length == 2) {
+                    int targetWeek = Integer.parseInt(weekAndDay[0]);
+                    String[] days = weekAndDay[1].split(",");
+                    
+                    if (weekOfMonth == targetWeek) {
+                        DayOfWeek dateDay2 = date.getDayOfWeek();
+                        for (String day : days) {
+                            if (getDayOfWeek(day) == dateDay2) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                return false;
+                
+            default:
+                return false;
+        }
+    }
+    
+    private DayOfWeek getDayOfWeek(String weekdayStr) {
+        switch (weekdayStr.toUpperCase()) {
+            case "MONDAY": return DayOfWeek.MONDAY;
+            case "TUESDAY": return DayOfWeek.TUESDAY;
+            case "WEDNESDAY": return DayOfWeek.WEDNESDAY;
+            case "THURSDAY": return DayOfWeek.THURSDAY;
+            case "FRIDAY": return DayOfWeek.FRIDAY;
+            case "SATURDAY": return DayOfWeek.SATURDAY;
+            case "SUNDAY": return DayOfWeek.SUNDAY;
+            default: return null;
+        }
+    }
+}
+
+// 排班配置类
+class ScheduleConfig {
+    int minA = 3;
+    int maxA = 4;
+    int minP = 4;
+    int maxP = 5;
+    
+    List<Employee> employees = new ArrayList<>();
+    List<DateRule> dateRules = new ArrayList<>();
+    List<Holiday> holidays = new ArrayList<>();
+    
+    boolean prioritizeWeeklyConsistency = true;
+    boolean weekendRest = true;
+    
+    public ScheduleConfig() {
+        String[] employeeData = {
+            "1,张三,A+D",
+            "2,李四,A+D", 
+            "3,王五,A+D",
+            "4,赵六,D+A",
+            "5,钱七,D",
+            "6,孙八,D+A",
+            "7,周九,D",
+            "8,吴十,D+P",
+            "9,郑十一,P+D+A",
+            "10,王十二,A+P+D",
+            "11,刘十三,D+A",
+            "12,陈十四,D+P+A",
+            "13,杨十五,D+A+P",
+            "14,黄十六,P",
+            "15,朱十七,P"
+        };
+        
+        for (String data : employeeData) {
+            String[] parts = data.split(",");
+            int id = Integer.parseInt(parts[0]);
+            String name = parts[1];
+            String pattern = parts[2];
+            employees.add(new Employee(id, name, pattern));
+        }
+        
+        // 添加2026年1月份的法定节假日（示例）
+        // 注意：实际节假日需要根据国家规定设置
+        addHoliday("元旦", LocalDate.of(2026, 1, 1));
+        addHoliday("元旦", LocalDate.of(2026, 1, 2));
+        addHoliday("元旦", LocalDate.of(2026, 1, 3));
+    }
+    
+    // 添加节假日
+    public void addHoliday(String name, LocalDate date) {
+        holidays.add(new Holiday(name, date));
+    }
+    
+    public void addHoliday(String name, String dateStr) {
+        holidays.add(new Holiday(name, LocalDate.parse(dateStr)));
+    }
+    
+    public boolean isHoliday(LocalDate date) {
+        return holidays.stream().anyMatch(h -> h.date.equals(date));
+    }
+    
+    public String getHolidayName(LocalDate date) {
+        return holidays.stream()
+            .filter(h -> h.date.equals(date))
+            .map(h -> h.name)
+            .findFirst()
+            .orElse("");
+    }
+    
+    // 添加日期规则
+    public void addDateRule(int employeeId, ShiftType requiredShift, 
+                           String ruleType, String ruleValue, int priority) {
+        dateRules.add(new DateRule(employeeId, requiredShift, ruleType, ruleValue, priority));
+    }
+    
+    public void addWeekdayRule(int employeeId, ShiftType requiredShift, 
+                              String weekdays, int priority) {
+        addDateRule(employeeId, requiredShift, "WEEKDAY", weekdays, priority);
+    }
+}
+
+public class SchedulingWithHolidays {
+    private ScheduleConfig config;
+    private int year;
+    private int month;
+    private LocalDate startDate;
+    private LocalDate endDate;
+    
+    private ShiftType[][] schedule;
+    private List<LocalDate> allDates = new ArrayList<>();
+    private List<DayOfWeek> weekdays = new ArrayList<>();
+    private List<Integer> weekNumbers = new ArrayList<>();
+    private List<Boolean> isHolidayList = new ArrayList<>();
+    private List<Boolean> isWeekendList = new ArrayList<>();
+    
+    public static void main(String[] args) {
+        SchedulingWithHolidays scheduler = new SchedulingWithHolidays();
+        
+        // 创建配置
+        ScheduleConfig config = new ScheduleConfig();
+        
+        // 可以添加更多节假日（示例）
+        config.addHoliday("元旦调休", LocalDate.of(2026, 1, 4));
+        
+        // 可以添加日期规则（可选）
+        // config.addWeekdayRule(1, ShiftType.A, "MONDAY,TUESDAY", 10);
+        // config.addWeekdayRule(9, ShiftType.P, "MONDAY,TUESDAY", 10);
+        
+        // 设置排班参数并生成排班
+        scheduler.setScheduleParameters(2026, 1, config);
+        boolean success = scheduler.generateSchedule();
+        
+        if (success) {
+            scheduler.printSchedule();
+            scheduler.printStatistics();
+        } else {
+            System.out.println("生成排班失败，请调整规则或人数限制");
+        }
+    }
+    
+    public void setScheduleParameters(int year, int month, ScheduleConfig config) {
+        this.year = year;
+        this.month = month;
+        this.config = config;
+        this.startDate = LocalDate.of(year, month, 1);
+        this.endDate = startDate.plusMonths(1).minusDays(1);
+    }
+    
+    public boolean generateSchedule() {
+        // 初始化所有日期
+        initializeAllDates();
+        
+        // 初始化排班表
+        int employeeCount = config.employees.size();
+        int dateCount = allDates.size();
+        schedule = new ShiftType[employeeCount][dateCount];
+        
+        // 第一步：设置节假日
+        applyHolidays();
+        
+        // 第二步：设置周末休息
+        applyWeekendRest();
+        
+        // 第三步：应用日期规则
+        applyDateRules();
+        
+        // 第四步：为工作日生成推荐排班
+        generateRecommendedShifts();
+        
+        // 第五步：调整排班以满足人数限制
+        return adjustSchedule();
+    }
+    
+    private void initializeAllDates() {
+        allDates.clear();
+        weekdays.clear();
+        weekNumbers.clear();
+        isHolidayList.clear();
+        isWeekendList.clear();
+        
+        LocalDate current = startDate;
+        while (!current.isAfter(endDate)) {
+            allDates.add(current);
+            weekdays.add(current.getDayOfWeek());
+            weekNumbers.add((current.getDayOfMonth() - 1) / 7 + 1);
+            
+            // 检查是否为节假日
+            boolean isHoliday = config.isHoliday(current);
+            isHolidayList.add(isHoliday);
+            
+            // 检查是否为周末
+            boolean isWeekend = current.getDayOfWeek() == DayOfWeek.SATURDAY || 
+                               current.getDayOfWeek() == DayOfWeek.SUNDAY;
+            isWeekendList.add(isWeekend);
+            
+            current = current.plusDays(1);
+        }
+    }
+    
+    private void applyHolidays() {
+        for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+            if (isHolidayList.get(dayIdx)) {
+                for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+                    schedule[empIdx][dayIdx] = ShiftType.PH;
+                }
+            }
+        }
+    }
+    
+    private void applyWeekendRest() {
+        if (!config.weekendRest) return;
+        
+        for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+            // 跳过已经设置为PH的节假日
+            if (schedule[0][dayIdx] == ShiftType.PH) continue;
+            
+            if (isWeekendList.get(dayIdx)) {
+                for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+                    schedule[empIdx][dayIdx] = ShiftType.REST;
+                }
+            }
+        }
+    }
+    
+    private void applyDateRules() {
+        for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+            // 跳过节假日和周末
+            if (schedule[0][dayIdx] == ShiftType.PH || schedule[0][dayIdx] == ShiftType.REST) {
+                continue;
+            }
+            
+            LocalDate date = allDates.get(dayIdx);
+            int weekOfMonth = weekNumbers.get(dayIdx);
+            
+            // 为每个员工检查规则
+            for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+                Employee emp = config.employees.get(empIdx);
+                
+                // 查找最高优先级的规则
+                DateRule highestRule = null;
+                for (DateRule rule : config.dateRules) {
+                    if (rule.employeeId == emp.id && rule.matches(date, weekOfMonth)) {
+                        if (highestRule == null || rule.priority > highestRule.priority) {
+                            highestRule = rule;
+                        }
+                    }
+                }
+                
+                // 应用规则
+                if (highestRule != null) {
+                    schedule[empIdx][dayIdx] = highestRule.requiredShift;
+                }
+            }
+        }
+    }
+    
+    private void generateRecommendedShifts() {
+        for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+            // 跳过节假日、周末和已安排规则的日期
+            if (schedule[0][dayIdx] != null) continue;
+            
+            int weekOfMonth = weekNumbers.get(dayIdx);
+            
+            for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+                // 如果已有安排，跳过
+                if (schedule[empIdx][dayIdx] != null) continue;
+                
+                Employee emp = config.employees.get(empIdx);
+                ShiftType recommended = emp.getRecommendedShift(weekOfMonth);
+                schedule[empIdx][dayIdx] = recommended;
+            }
+        }
+    }
+    
+    private boolean adjustSchedule() {
+        int maxAttempts = 10000;
+        int attempts = 0;
+        
+        while (attempts < maxAttempts) {
+            boolean allConstraintsSatisfied = true;
+            
+            // 检查每天的约束（只检查工作日）
+            for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+                // 跳过节假日、周末和非工作日
+                if (!isWorkDay(dayIdx)) continue;
+                
+                int aCount = 0, pCount = 0;
+                
+                // 统计当天的班次
+                for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+                    ShiftType shift = schedule[empIdx][dayIdx];
+                    if (shift == ShiftType.A) aCount++;
+                    else if (shift == ShiftType.P) pCount++;
+                }
+                
+                // 检查约束
+                boolean aOk = aCount >= config.minA && aCount <= config.maxA;
+                boolean pOk = pCount >= config.minP && pCount <= config.maxP;
+                
+                if (!aOk || !pOk) {
+                    allConstraintsSatisfied = false;
+                    
+                    if (!adjustDaySchedule(dayIdx, aCount, pCount)) {
+                        return false; // 调整失败
+                    }
+                }
+            }
+            
+            if (allConstraintsSatisfied) {
+                return true;
+            }
+            
+            attempts++;
+        }
+        
+        return false; // 达到最大尝试次数仍未满足约束
+    }
+    
+    private boolean isWorkDay(int dayIdx) {
+        // 不是节假日、不是周末，且班次不是PH或REST的日期才是工作日
+        return !isHolidayList.get(dayIdx) && 
+               !(config.weekendRest && isWeekendList.get(dayIdx));
+    }
+    
+    private boolean adjustDaySchedule(int dayIdx, int aCount, int pCount) {
+        if (!isWorkDay(dayIdx)) return true;
+        
+        LocalDate date = allDates.get(dayIdx);
+        int weekOfMonth = weekNumbers.get(dayIdx);
+        
+        // 找出需要调整的员工（没有固定规则的员工）
+        List<Integer> adjustableEmployees = new ArrayList<>();
+        for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+            // 检查是否有规则限制
+            boolean hasRule = false;
+            Employee emp = config.employees.get(empIdx);
+            for (DateRule rule : config.dateRules) {
+                if (rule.employeeId == emp.id && rule.matches(date, weekOfMonth)) {
+                    hasRule = true;
+                    break;
+                }
+            }
+            
+            if (!hasRule) {
+                adjustableEmployees.add(empIdx);
+            }
+        }
+        
+        // 尝试调整
+        Random rand = new Random(dayIdx * 1000);
+        for (int attempt = 0; attempt < 100; attempt++) {
+            int empIdx = adjustableEmployees.get(rand.nextInt(adjustableEmployees.size()));
+            Employee emp = config.employees.get(empIdx);
+            
+            ShiftType currentShift = schedule[empIdx][dayIdx];
+            
+            // 尝试其他班次
+            for (ShiftType newShift : emp.shiftWeights.keySet()) {
+                if (newShift == currentShift) continue;
+                
+                // 计算新的人数
+                int newA = aCount, newP = pCount;
+                if (currentShift == ShiftType.A) newA--;
+                else if (currentShift == ShiftType.P) newP--;
+                
+                if (newShift == ShiftType.A) newA++;
+                else if (newShift == ShiftType.P) newP++;
+                
+                // 检查是否满足约束
+                boolean aOk = newA >= config.minA && newA <= config.maxA;
+                boolean pOk = newP >= config.minP && newP <= config.maxP;
+                
+                if (aOk && pOk) {
+                    schedule[empIdx][dayIdx] = newShift;
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    public void printSchedule() {
+        System.out.println("带节假日的排班系统 - " + year + "年" + month + "月份");
+        System.out.println("=".repeat(150));
+        System.out.println("PH: 法定节假日 | REST: 周末休息 | A: 早班 | D: 中班 | P: 晚班");
+        System.out.println("=".repeat(150));
+        
+        // 打印表头
+        System.out.print("员工\t姓名\t倾向模式\t");
+        for (int i = 0; i < allDates.size(); i++) {
+            LocalDate date = allDates.get(i);
+            String dayStr = getChineseDayOfWeek(date.getDayOfWeek());
+            
+            // 如果是节假日，添加节假日标记
+            if (isHolidayList.get(i)) {
+                String holidayName = config.getHolidayName(date);
+                System.out.printf("%d日(%s)%s\t", date.getDayOfMonth(), dayStr, holidayName);
+            } else {
+                System.out.printf("%d日(%s)\t", date.getDayOfMonth(), dayStr);
+            }
+        }
+        System.out.println();
+        
+        // 打印排班表
+        for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+            Employee emp = config.employees.get(empIdx);
+            System.out.printf("%02d\t%s\t%s\t\t", 
+                emp.id, emp.name, String.join("+", emp.shiftPattern));
+            
+            for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+                ShiftType shift = schedule[empIdx][dayIdx];
+                if (shift == null) {
+                    System.out.print("?\t");
+                } else {
+                    System.out.print(shift + "\t");
+                }
+            }
+            System.out.println();
+        }
+    }
+    
+    public void printStatistics() {
+        System.out.println("\n" + "=".repeat(150));
+        System.out.println("排班统计");
+        System.out.println("=".repeat(150));
+        
+        // 节假日统计
+        int holidayCount = 0;
+        for (boolean isHoliday : isHolidayList) {
+            if (isHoliday) holidayCount++;
+        }
+        
+        System.out.println("月份天数: " + allDates.size() + "天");
+        System.out.println("节假日天数: " + holidayCount + "天");
+        
+        // 每日统计（只统计工作日）
+        System.out.println("\n每日班次统计（仅工作日）:");
+        System.out.print("日期\t\t");
+        for (int i = 0; i < allDates.size(); i++) {
+            if (isWorkDay(i)) {
+                LocalDate date = allDates.get(i);
+                System.out.printf("%d日\t", date.getDayOfMonth());
+            }
+        }
+        
+        System.out.print("\nA班人数\t");
+        for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+            if (isWorkDay(dayIdx)) {
+                int count = 0;
+                for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+                    if (schedule[empIdx][dayIdx] == ShiftType.A) count++;
+                }
+                System.out.print(count + "\t");
+            }
+        }
+        
+        System.out.print("\nD班人数\t");
+        for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+            if (isWorkDay(dayIdx)) {
+                int count = 0;
+                for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+                    if (schedule[empIdx][dayIdx] == ShiftType.D) count++;
+                }
+                System.out.print(count + "\t");
+            }
+        }
+        
+        System.out.print("\nP班人数\t");
+        for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+            if (isWorkDay(dayIdx)) {
+                int count = 0;
+                for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+                    if (schedule[empIdx][dayIdx] == ShiftType.P) count++;
+                }
+                System.out.print(count + "\t");
+            }
+        }
+        
+        // 员工月度统计（排除节假日和周末）
+        System.out.println("\n\n员工月度班次统计（仅工作日）:");
+        System.out.println("员工\t姓名\tA班\tD班\tP班\t工作日\tPH\tREST\t总计");
+        System.out.println("-".repeat(80));
+        
+        for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+            Employee emp = config.employees.get(empIdx);
+            int aCount = 0, dCount = 0, pCount = 0, phCount = 0, restCount = 0;
+            
+            for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+                ShiftType shift = schedule[empIdx][dayIdx];
+                if (shift == ShiftType.A) aCount++;
+                else if (shift == ShiftType.D) dCount++;
+                else if (shift == ShiftType.P) pCount++;
+                else if (shift == ShiftType.PH) phCount++;
+                else if (shift == ShiftType.REST) restCount++;
+            }
+            
+            int workDays = aCount + dCount + pCount;
+            int total = workDays + phCount + restCount;
+            
+            System.out.printf("%02d\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d%n",
+                emp.id, emp.name, aCount, dCount, pCount, workDays, phCount, restCount, total);
+        }
+        
+        // 约束检查
+        System.out.println("\n约束条件检查:");
+        boolean allOk = true;
+        for (int dayIdx = 0; dayIdx < allDates.size(); dayIdx++) {
+            if (!isWorkDay(dayIdx)) continue;
+            
+            int aCount = 0, pCount = 0;
+            
+            for (int empIdx = 0; empIdx < config.employees.size(); empIdx++) {
+                ShiftType shift = schedule[empIdx][dayIdx];
+                if (shift == ShiftType.A) aCount++;
+                else if (shift == ShiftType.P) pCount++;
+            }
+            
+            boolean aOk = aCount >= config.minA && aCount <= config.maxA;
+            boolean pOk = pCount >= config.minP && pCount <= config.maxP;
+            
+            if (!aOk || !pOk) {
+                LocalDate date = allDates.get(dayIdx);
+                System.out.printf("%d日: A班%d人(%s) P班%d人(%s)%n",
+                    date.getDayOfMonth(),
+                    aCount, aOk ? "OK" : "不符合",
+                    pCount, pOk ? "OK" : "不符合");
+                allOk = false;
+            }
+        }
+        
+        if (allOk) {
+            System.out.println("✓ 所有工作日的排班均满足限制条件！");
+        } else {
+            System.out.println("✗ 部分工作日的排班不满足限制条件！");
+        }
+        
+        // 节假日列表
+        System.out.println("\n节假日列表:");
+        for (Holiday holiday : config.holidays) {
+            String dayStr = getChineseDayOfWeek(holiday.date.getDayOfWeek());
+            System.out.printf("%s: %d月%d日 (%s)%n", 
+                holiday.name, holiday.date.getMonthValue(), 
+                holiday.date.getDayOfMonth(), dayStr);
+        }
+    }
+    
+    private String getChineseDayOfWeek(DayOfWeek dayOfWeek) {
+        switch (dayOfWeek) {
+            case MONDAY: return "一";
+            case TUESDAY: return "二";
+            case WEDNESDAY: return "三";
+            case THURSDAY: return "四";
+            case FRIDAY: return "五";
+            case SATURDAY: return "六";
+            case SUNDAY: return "日";
+            default: return "";
+        }
+    }
+    
+    // 添加节假日的方法
+    public void addHolidayToConfig(String name, String dateStr) {
+        config.addHoliday(name, dateStr);
+    }
+    
+    // 批量添加节假日的方法
+    public void addHolidays(List<String[]> holidayData) {
+        for (String[] data : holidayData) {
+            if (data.length == 2) {
+                config.addHoliday(data[0], data[1]);
+            }
+        }
+    }
+}
