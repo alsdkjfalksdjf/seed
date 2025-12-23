@@ -1,0 +1,833 @@
+import java.time.LocalDate;
+import java.time.DayOfWeek;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+// 班次类型
+enum ShiftType {
+    A, D, P,           // 正常工作班次
+    PH,                // 法定节假日
+    REST,              // 周末休息
+    SD,                // 周六值班
+    SU,                // 周日值班
+    CR                 // 补休
+}
+
+// 员工类
+class Employee {
+    int id;
+    String name;
+    String pattern;  // 倾向模式，如 "A+D"
+    Map<ShiftType, Integer> annualCount;  // 年度各类班次统计
+    
+    public Employee(int id, String name, String pattern) {
+        this.id = id;
+        this.name = name;
+        this.pattern = pattern;
+        this.annualCount = new HashMap<>();
+        for (ShiftType type : ShiftType.values()) {
+            annualCount.put(type, 0);
+        }
+    }
+    
+    public void incrementShift(ShiftType type) {
+        annualCount.put(type, annualCount.get(type) + 1);
+    }
+    
+    public int getWorkDayCount() {
+        return annualCount.get(ShiftType.A) + 
+               annualCount.get(ShiftType.D) + 
+               annualCount.get(ShiftType.P);
+    }
+    
+    public int getWeekendDutyCount() {
+        return annualCount.get(ShiftType.SD) + annualCount.get(ShiftType.SU);
+    }
+    
+    public int getTotalDays() {
+        int total = 0;
+        for (int count : annualCount.values()) {
+            total += count;
+        }
+        return total;
+    }
+}
+
+// 节假日管理
+class HolidayManager {
+    private static final Map<LocalDate, String> HOLIDAYS_2026 = new HashMap<>();
+    
+    static {
+        // 2026年法定节假日（示例，实际需根据国家规定调整）
+        // 元旦
+        addHolidayRange("元旦", 2026, 1, 1, 2026, 1, 3);
+        
+        // 春节
+        addHolidayRange("春节", 2026, 2, 7, 2026, 2, 13);
+        
+        // 清明节
+        addHoliday("清明节", 2026, 4, 5);
+        addHoliday("清明节", 2026, 4, 6);
+        
+        // 劳动节
+        addHolidayRange("劳动节", 2026, 5, 1, 2026, 5, 3);
+        
+        // 端午节
+        addHolidayRange("端午节", 2026, 6, 7, 2026, 6, 9);
+        
+        // 中秋节
+        addHolidayRange("中秋节", 2026, 9, 19, 2026, 9, 21);
+        
+        // 国庆节
+        addHolidayRange("国庆节", 2026, 10, 1, 2026, 10, 7);
+    }
+    
+    private static void addHoliday(String name, int year, int month, int day) {
+        HOLIDAYS_2026.put(LocalDate.of(year, month, day), name);
+    }
+    
+    private static void addHolidayRange(String name, int startYear, int startMonth, int startDay,
+                                        int endYear, int endMonth, int endDay) {
+        LocalDate start = LocalDate.of(startYear, startMonth, startDay);
+        LocalDate end = LocalDate.of(endYear, endMonth, endDay);
+        LocalDate current = start;
+        while (!current.isAfter(end)) {
+            HOLIDAYS_2026.put(current, name);
+            current = current.plusDays(1);
+        }
+    }
+    
+    public static boolean isHoliday(LocalDate date) {
+        return HOLIDAYS_2026.containsKey(date);
+    }
+    
+    public static String getHolidayName(LocalDate date) {
+        return HOLIDAYS_2026.get(date);
+    }
+    
+    public static List<LocalDate> getAllHolidays(int year) {
+        List<LocalDate> holidays = new ArrayList<>();
+        for (LocalDate date : HOLIDAYS_2026.keySet()) {
+            if (date.getYear() == year) {
+                holidays.add(date);
+            }
+        }
+        return holidays;
+    }
+}
+
+// 年度排班系统
+public class AnnualSchedulingSystem {
+    private static final Employee[] EMPLOYEES = {
+        new Employee(1, "张三", "A+D"),
+        new Employee(2, "李四", "A+D"), 
+        new Employee(3, "王五", "A+D"),
+        new Employee(4, "赵六", "D+A"),
+        new Employee(5, "钱七", "D"),
+        new Employee(6, "孙八", "D+A"),
+        new Employee(7, "周九", "D"),
+        new Employee(8, "吴十", "D+P"),
+        new Employee(9, "郑十一", "P+D+A"),
+        new Employee(10, "王十二", "A+P+D"),
+        new Employee(11, "刘十三", "D+A"),
+        new Employee(12, "陈十四", "D+P+A"),
+        new Employee(13, "杨十五", "D+A+P"),
+        new Employee(14, "黄十六", "P"),
+        new Employee(15, "朱十七", "P")
+    };
+    
+    // 年度排班结果: schedule[员工索引][天索引]
+    private ShiftType[][] annualSchedule;
+    private int year = 2026;
+    private int daysInYear = 365;  // 2026年是平年
+    
+    // 历史周末值班记录（用于公平性安排）
+    private Map<Integer, Integer> historicalSaturdayDuty = new HashMap<>();
+    private Map<Integer, Integer> historicalSundayDuty = new HashMap<>();
+    
+    public static void main(String[] args) {
+        AnnualSchedulingSystem system = new AnnualSchedulingSystem();
+        
+        System.out.println("2026年度排班系统 - 公平性分析");
+        System.out.println("=".repeat(120));
+        
+        // 生成年度排班
+        system.generateAnnualSchedule();
+        
+        // 分析公平性
+        system.analyzeFairness();
+        
+        // 输出详细统计
+        system.printAnnualStatistics();
+        
+        // 输出每个月的排班概览
+        system.printMonthlyOverview();
+    }
+    
+    public void generateAnnualSchedule() {
+        // 初始化年度排班表
+        annualSchedule = new ShiftType[EMPLOYEES.length][daysInYear];
+        
+        // 初始化历史值班记录
+        for (Employee emp : EMPLOYEES) {
+            historicalSaturdayDuty.put(emp.id, 0);
+            historicalSundayDuty.put(emp.id, 0);
+        }
+        
+        // 按月生成排班
+        for (int month = 1; month <= 12; month++) {
+            generateMonthlySchedule(month);
+        }
+        
+        // 统计员工年度班次
+        countAnnualShifts();
+    }
+    
+    private void generateMonthlySchedule(int month) {
+        LocalDate firstDay = LocalDate.of(year, month, 1);
+        LocalDate lastDay = firstDay.withDayOfMonth(firstDay.lengthOfMonth());
+        
+        int startDayOfYear = firstDay.getDayOfYear() - 1;  // 数组索引从0开始
+        int daysInMonth = firstDay.lengthOfMonth();
+        
+        // 第一步：设置节假日
+        for (int day = 0; day < daysInMonth; day++) {
+            LocalDate date = LocalDate.of(year, month, day + 1);
+            int dayOfYear = date.getDayOfYear() - 1;
+            
+            if (HolidayManager.isHoliday(date)) {
+                for (int emp = 0; emp < EMPLOYEES.length; emp++) {
+                    annualSchedule[emp][dayOfYear] = ShiftType.PH;
+                }
+            }
+        }
+        
+        // 第二步：设置周末休息（节假日已覆盖的部分跳过）
+        for (int day = 0; day < daysInMonth; day++) {
+            LocalDate date = LocalDate.of(year, month, day + 1);
+            int dayOfYear = date.getDayOfYear() - 1;
+            
+            // 跳过已设置节假日的日期
+            if (annualSchedule[0][dayOfYear] == ShiftType.PH) continue;
+            
+            DayOfWeek dayOfWeek = date.getDayOfWeek();
+            if (dayOfWeek == DayOfWeek.SATURDAY || dayOfWeek == DayOfWeek.SUNDAY) {
+                for (int emp = 0; emp < EMPLOYEES.length; emp++) {
+                    annualSchedule[emp][dayOfYear] = ShiftType.REST;
+                }
+            }
+        }
+        
+        // 第三步：安排周末值班
+        scheduleWeekendDuty(month, startDayOfYear, daysInMonth);
+        
+        // 第四步：安排工作日班次
+        scheduleWorkdays(month, startDayOfYear, daysInMonth);
+        
+        // 第五步：安排补休
+        scheduleCompensatoryDays(month, startDayOfYear, daysInMonth);
+    }
+    
+    private void scheduleWeekendDuty(int month, int startDay, int daysInMonth) {
+        // 周六需要3人值班，周日需要2人值班
+        int saturdayRequired = 3;
+        int sundayRequired = 2;
+        
+        for (int day = 0; day < daysInMonth; day++) {
+            LocalDate date = LocalDate.of(year, month, day + 1);
+            int dayOfYear = startDay + day;
+            
+            // 跳过节假日
+            if (annualSchedule[0][dayOfYear] == ShiftType.PH) continue;
+            
+            DayOfWeek dayOfWeek = date.getDayOfWeek();
+            
+            if (dayOfWeek == DayOfWeek.SATURDAY) {
+                // 安排周六值班
+                assignSaturdayDuty(date, dayOfYear, saturdayRequired);
+            } else if (dayOfWeek == DayOfWeek.SUNDAY) {
+                // 安排周日值班
+                assignSundayDuty(date, dayOfYear, sundayRequired);
+            }
+        }
+    }
+    
+    private void assignSaturdayDuty(LocalDate date, int dayOfYear, int requiredCount) {
+        // 按历史值班次数排序，值班少的优先
+        List<EmployeeDutyRecord> employees = new ArrayList<>();
+        for (Employee emp : EMPLOYEES) {
+            int saturdayDuty = historicalSaturdayDuty.get(emp.id);
+            int sundayDuty = historicalSundayDuty.get(emp.id);
+            int totalDuty = saturdayDuty + sundayDuty;
+            employees.add(new EmployeeDutyRecord(emp, totalDuty));
+        }
+        
+        Collections.sort(employees, Comparator.comparingInt(EmployeeDutyRecord::getTotalDuty));
+        
+        int assigned = 0;
+        for (EmployeeDutyRecord record : employees) {
+            if (assigned >= requiredCount) break;
+            
+            int empIdx = record.employee.id - 1;
+            
+            // 检查该员工这天是否可用
+            if (annualSchedule[empIdx][dayOfYear] == ShiftType.REST) {
+                annualSchedule[empIdx][dayOfYear] = ShiftType.SD;
+                record.incrementDuty();
+                historicalSaturdayDuty.put(record.employee.id, 
+                    historicalSaturdayDuty.get(record.employee.id) + 1);
+                assigned++;
+            }
+        }
+    }
+    
+    private void assignSundayDuty(LocalDate date, int dayOfYear, int requiredCount) {
+        // 避免同一员工周末连续值班
+        int saturdayDay = dayOfYear - 1;
+        Set<Integer> saturdayDutyEmployees = new HashSet<>();
+        if (saturdayDay >= 0) {
+            for (int empIdx = 0; empIdx < EMPLOYEES.length; empIdx++) {
+                if (annualSchedule[empIdx][saturdayDay] == ShiftType.SD) {
+                    saturdayDutyEmployees.add(empIdx);
+                }
+            }
+        }
+        
+        // 按历史值班次数排序
+        List<EmployeeDutyRecord> employees = new ArrayList<>();
+        for (Employee emp : EMPLOYEES) {
+            int saturdayDuty = historicalSaturdayDuty.get(emp.id);
+            int sundayDuty = historicalSundayDuty.get(emp.id);
+            int totalDuty = saturdayDuty + sundayDuty;
+            employees.add(new EmployeeDutyRecord(emp, totalDuty));
+        }
+        
+        Collections.sort(employees, Comparator.comparingInt(EmployeeDutyRecord::getTotalDuty));
+        
+        int assigned = 0;
+        for (EmployeeDutyRecord record : employees) {
+            if (assigned >= requiredCount) break;
+            
+            int empIdx = record.employee.id - 1;
+            
+            // 跳过周六已值班的员工
+            if (saturdayDutyEmployees.contains(empIdx)) continue;
+            
+            // 检查该员工这天是否可用
+            if (annualSchedule[empIdx][dayOfYear] == ShiftType.REST) {
+                annualSchedule[empIdx][dayOfYear] = ShiftType.SU;
+                record.incrementDuty();
+                historicalSundayDuty.put(record.employee.id, 
+                    historicalSundayDuty.get(record.employee.id) + 1);
+                assigned++;
+            }
+        }
+    }
+    
+    private void scheduleWorkdays(int month, int startDay, int daysInMonth) {
+        int minA = 3, maxA = 4;
+        int minP = 4, maxP = 5;
+        
+        for (int day = 0; day < daysInMonth; day++) {
+            LocalDate date = LocalDate.of(year, month, day + 1);
+            int dayOfYear = startDay + day;
+            
+            // 跳过节假日、周末、值班
+            if (!isWorkday(date, dayOfYear)) continue;
+            
+            // 计算当天A班和P班的人数
+            int aCount = 0, pCount = 0;
+            for (int emp = 0; emp < EMPLOYEES.length; emp++) {
+                if (annualSchedule[emp][dayOfYear] == ShiftType.A) aCount++;
+                else if (annualSchedule[emp][dayOfYear] == ShiftType.P) pCount++;
+            }
+            
+            // 计算当月第几周
+            int weekOfMonth = (date.getDayOfMonth() - 1) / 7 + 1;
+            
+            // 为还没有安排的员工安排班次
+            for (int emp = 0; emp < EMPLOYEES.length; emp++) {
+                if (annualSchedule[emp][dayOfYear] == null) {
+                    String[] pattern = EMPLOYEES[emp].pattern.split("\\+");
+                    ShiftType assignedShift = determineShift(pattern, weekOfMonth, aCount, pCount, minA, maxA, minP, maxP);
+                    
+                    annualSchedule[emp][dayOfYear] = assignedShift;
+                    
+                    if (assignedShift == ShiftType.A) aCount++;
+                    else if (assignedShift == ShiftType.P) pCount++;
+                }
+            }
+        }
+    }
+    
+    private void scheduleCompensatoryDays(int month, int startDay, int daysInMonth) {
+        // 查找本月有值班的员工
+        Map<Integer, List<Integer>> employeeDutyDays = new HashMap<>();
+        
+        for (int day = 0; day < daysInMonth; day++) {
+            int dayOfYear = startDay + day;
+            
+            for (int emp = 0; emp < EMPLOYEES.length; emp++) {
+                ShiftType shift = annualSchedule[emp][dayOfYear];
+                if (shift == ShiftType.SD || shift == ShiftType.SU) {
+                    employeeDutyDays
+                        .computeIfAbsent(emp, k -> new ArrayList<>())
+                        .add(dayOfYear);
+                }
+            }
+        }
+        
+        // 为每个有值班的员工安排补休
+        for (Map.Entry<Integer, List<Integer>> entry : employeeDutyDays.entrySet()) {
+            int empIdx = entry.getKey();
+            for (int dutyDay : entry.getValue()) {
+                // 在值班后的一周内安排补休
+                int compensatoryDay = findCompensatoryDay(empIdx, dutyDay);
+                if (compensatoryDay >= 0 && compensatoryDay < daysInYear) {
+                    annualSchedule[empIdx][compensatoryDay] = ShiftType.CR;
+                }
+            }
+        }
+    }
+    
+    private int findCompensatoryDay(int empIdx, int dutyDay) {
+        // 在值班后的一周内（5个工作日内）寻找可用的工作日
+        for (int offset = 1; offset <= 7 && dutyDay + offset < daysInYear; offset++) {
+            int candidateDay = dutyDay + offset;
+            
+            // 检查是否在年内
+            if (candidateDay >= daysInYear) break;
+            
+            LocalDate date = LocalDate.ofYearDay(year, candidateDay + 1);
+            
+            // 跳过节假日和周末
+            if (HolidayManager.isHoliday(date)) continue;
+            if (date.getDayOfWeek() == DayOfWeek.SATURDAY || date.getDayOfWeek() == DayOfWeek.SUNDAY) continue;
+            
+            // 检查该员工这天是否已有安排
+            if (annualSchedule[empIdx][candidateDay] == null) {
+                return candidateDay;
+            }
+        }
+        
+        return -1; // 未找到合适的补休日
+    }
+    
+    private boolean isWorkday(LocalDate date, int dayOfYear) {
+        // 不是节假日，不是周末，没有安排值班
+        if (HolidayManager.isHoliday(date)) return false;
+        if (date.getDayOfWeek() == DayOfWeek.SATURDAY || date.getDayOfWeek() == DayOfWeek.SUNDAY) {
+            return false;
+        }
+        
+        // 检查是否安排了周末值班
+        for (int emp = 0; emp < EMPLOYEES.length; emp++) {
+            ShiftType shift = annualSchedule[emp][dayOfYear];
+            if (shift == ShiftType.SD || shift == ShiftType.SU) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    private ShiftType determineShift(String[] pattern, int week, int aCount, int pCount, 
+                                     int minA, int maxA, int minP, int maxP) {
+        // 根据周数选择倾向模式
+        int index = (week - 1) % pattern.length;
+        String preferredShift = pattern[index];
+        
+        // 优先满足人数限制
+        if (aCount < minA) {
+            return ShiftType.A;
+        } else if (pCount < minP) {
+            return ShiftType.P;
+        } else if (aCount < maxA && preferredShift.equals("A")) {
+            return ShiftType.A;
+        } else if (pCount < maxP && preferredShift.equals("P")) {
+            return ShiftType.P;
+        } else if (preferredShift.equals("D")) {
+            return ShiftType.D;
+        } else if (preferredShift.equals("A") && aCount < maxA) {
+            return ShiftType.A;
+        } else if (preferredShift.equals("P") && pCount < maxP) {
+            return ShiftType.P;
+        } else {
+            // 默认返回D班
+            return ShiftType.D;
+        }
+    }
+    
+    private void countAnnualShifts() {
+        for (int day = 0; day < daysInYear; day++) {
+            for (int emp = 0; emp < EMPLOYEES.length; emp++) {
+                ShiftType shift = annualSchedule[emp][day];
+                if (shift != null) {
+                    EMPLOYEES[emp].incrementShift(shift);
+                }
+            }
+        }
+    }
+    
+    public void analyzeFairness() {
+        System.out.println("\n公平性分析报告");
+        System.out.println("=".repeat(100));
+        
+        // 1. 周末值班公平性
+        System.out.println("\n一、周末值班公平性分析:");
+        System.out.println("-".repeat(80));
+        
+        List<EmployeeWeekendStats> weekendStats = new ArrayList<>();
+        for (Employee emp : EMPLOYEES) {
+            weekendStats.add(new EmployeeWeekendStats(emp));
+        }
+        
+        // 按周末值班总数排序
+        Collections.sort(weekendStats, 
+            Comparator.comparingInt(EmployeeWeekendStats::getTotalWeekendDuty));
+        
+        System.out.println("排名\t员工\t周六值班\t周日值班\t周末总值\t与平均差异");
+        System.out.println("-".repeat(80));
+        
+        int totalSaturdayDuty = 0;
+        int totalSundayDuty = 0;
+        for (EmployeeWeekendStats stats : weekendStats) {
+            totalSaturdayDuty += stats.saturdayDuty;
+            totalSundayDuty += stats.sundayDuty;
+        }
+        
+        double avgSaturdayDuty = totalSaturdayDuty * 1.0 / EMPLOYEES.length;
+        double avgSundayDuty = totalSundayDuty * 1.0 / EMPLOYEES.length;
+        double avgTotalWeekendDuty = avgSaturdayDuty + avgSundayDuty;
+        
+        for (int i = 0; i < weekendStats.size(); i++) {
+            EmployeeWeekendStats stats = weekendStats.get(i);
+            double diff = stats.totalWeekendDuty - avgTotalWeekendDuty;
+            System.out.printf("%d\t%s\t%d\t\t%d\t\t%d\t\t%+.1f%n", 
+                i + 1, stats.employee.name, stats.saturdayDuty, 
+                stats.sundayDuty, stats.totalWeekendDuty, diff);
+        }
+        
+        System.out.println("-".repeat(80));
+        System.out.printf("平均值\t-\t%.1f\t\t%.1f\t\t%.1f\t\t-\n", 
+            avgSaturdayDuty, avgSundayDuty, avgTotalWeekendDuty);
+        
+        // 计算标准差
+        double sumSquaredDiff = 0;
+        for (EmployeeWeekendStats stats : weekendStats) {
+            double diff = stats.totalWeekendDuty - avgTotalWeekendDuty;
+            sumSquaredDiff += diff * diff;
+        }
+        double stdDev = Math.sqrt(sumSquaredDiff / EMPLOYEES.length);
+        System.out.printf("标准差: %.2f (越小越公平)\n", stdDev);
+        
+        // 公平性评级
+        if (stdDev < 2.0) {
+            System.out.println("公平性评级: ★★★★★ (非常公平)");
+        } else if (stdDev < 3.0) {
+            System.out.println("公平性评级: ★★★★ (比较公平)");
+        } else if (stdDev < 4.0) {
+            System.out.println("公平性评级: ★★★ (一般)");
+        } else if (stdDev < 5.0) {
+            System.out.println("公平性评级: ★★ (不太公平)");
+        } else {
+            System.out.println("公平性评级: ★ (不公平)");
+        }
+        
+        // 2. 工作日班次公平性
+        System.out.println("\n二、工作日班次公平性分析:");
+        System.out.println("-".repeat(80));
+        
+        List<EmployeeWorkStats> workStats = new ArrayList<>();
+        for (Employee emp : EMPLOYEES) {
+            workStats.add(new EmployeeWorkStats(emp));
+        }
+        
+        // 按工作日总数排序
+        Collections.sort(workStats, 
+            Comparator.comparingInt(EmployeeWorkStats::getTotalWorkDays));
+        
+        System.out.println("排名\t员工\tA班\tD班\tP班\t工作总值\t与平均差异");
+        System.out.println("-".repeat(80));
+        
+        int totalA = 0, totalD = 0, totalP = 0;
+        for (EmployeeWorkStats stats : workStats) {
+            totalA += stats.aDays;
+            totalD += stats.dDays;
+            totalP += stats.pDays;
+        }
+        
+        double avgA = totalA * 1.0 / EMPLOYEES.length;
+        double avgD = totalD * 1.0 / EMPLOYEES.length;
+        double avgP = totalP * 1.0 / EMPLOYEES.length;
+        double avgTotalWorkDays = avgA + avgD + avgP;
+        
+        for (int i = 0; i < workStats.size(); i++) {
+            EmployeeWorkStats stats = workStats.get(i);
+            int totalWork = stats.aDays + stats.dDays + stats.pDays;
+            double diff = totalWork - avgTotalWorkDays;
+            System.out.printf("%d\t%s\t%d\t%d\t%d\t%d\t\t%+.1f%n", 
+                i + 1, stats.employee.name, stats.aDays, 
+                stats.dDays, stats.pDays, totalWork, diff);
+        }
+        
+        System.out.println("-".repeat(80));
+        System.out.printf("平均值\t-\t%.1f\t%.1f\t%.1f\t%.1f\t\t-\n", 
+            avgA, avgD, avgP, avgTotalWorkDays);
+        
+        // 3. 总体公平性分析
+        System.out.println("\n三、总体公平性分析:");
+        System.out.println("-".repeat(80));
+        
+        // 计算变异系数(Coefficient of Variation)
+        double meanWorkDays = avgTotalWorkDays;
+        double sumWorkDaysSquaredDiff = 0;
+        for (EmployeeWorkStats stats : workStats) {
+            int totalWork = stats.aDays + stats.dDays + stats.pDays;
+            double diff = totalWork - meanWorkDays;
+            sumWorkDaysSquaredDiff += diff * diff;
+        }
+        double stdDevWorkDays = Math.sqrt(sumWorkDaysSquaredDiff / EMPLOYEES.length);
+        double cvWorkDays = stdDevWorkDays / meanWorkDays;
+        
+        System.out.printf("工作天数变异系数: %.4f (越小越公平)\n", cvWorkDays);
+        
+        // 计算基尼系数
+        List<Integer> weekendDutyList = new ArrayList<>();
+        for (EmployeeWeekendStats stats : weekendStats) {
+            weekendDutyList.add(stats.totalWeekendDuty);
+        }
+        
+        double giniWeekend = calculateGiniCoefficient(weekendDutyList);
+        System.out.printf("周末值班基尼系数: %.4f (越小越公平, 0为完全公平, 1为完全不公平)\n", giniWeekend);
+        
+        // 公平性结论
+        System.out.println("\n四、公平性结论:");
+        System.out.println("-".repeat(80));
+        
+        if (stdDev < 3.0 && cvWorkDays < 0.1 && giniWeekend < 0.3) {
+            System.out.println("✓ 排班结果公平性良好，值班和工作分配相对均衡。");
+        } else if (stdDev < 4.0 && cvWorkDays < 0.15 && giniWeekend < 0.4) {
+            System.out.println("✓ 排班结果公平性可接受，有轻微不均衡但仍在合理范围。");
+        } else {
+            System.out.println("✗ 排班结果公平性不足，建议调整排班算法。");
+        }
+    }
+    
+    private double calculateGiniCoefficient(List<Integer> values) {
+        Collections.sort(values);
+        int n = values.size();
+        double sum = 0;
+        for (int i = 0; i < n; i++) {
+            sum += values.get(i);
+        }
+        
+        double giniSum = 0;
+        for (int i = 0; i < n; i++) {
+            giniSum += (2 * i - n + 1) * values.get(i);
+        }
+        
+        if (sum == 0) return 0;
+        return giniSum / (n * sum);
+    }
+    
+    public void printAnnualStatistics() {
+        System.out.println("\n" + "=".repeat(120));
+        System.out.println("2026年度排班统计");
+        System.out.println("=".repeat(120));
+        
+        // 1. 年度总览
+        System.out.println("\n一、年度总览:");
+        System.out.println("-".repeat(60));
+        
+        int totalHolidays = HolidayManager.getAllHolidays(year).size();
+        int totalWeekends = 0;
+        for (int day = 0; day < daysInYear; day++) {
+            LocalDate date = LocalDate.ofYearDay(year, day + 1);
+            if (date.getDayOfWeek() == DayOfWeek.SATURDAY || 
+                date.getDayOfWeek() == DayOfWeek.SUNDAY) {
+                totalWeekends++;
+            }
+        }
+        totalWeekends -= totalHolidays;  // 减去节假日落在周末的情况
+        
+        System.out.println("年份: " + year);
+        System.out.println("总天数: " + daysInYear + "天");
+        System.out.println("节假日: " + totalHolidays + "天");
+        System.out.println("周末: " + totalWeekends + "天");
+        System.out.println("工作日: " + (daysInYear - totalHolidays - totalWeekends) + "天");
+        System.out.println("员工总数: " + EMPLOYEES.length + "人");
+        
+        // 2. 员工详细统计
+        System.out.println("\n二、员工年度班次统计:");
+        System.out.println("-".repeat(120));
+        System.out.println("员工\t姓名\tA班\tD班\tP班\t工作日\tPH\tREST\tSD\tSU\tCR\t总计");
+        System.out.println("-".repeat(120));
+        
+        for (Employee emp : EMPLOYEES) {
+            Map<ShiftType, Integer> counts = emp.annualCount;
+            int workDays = emp.getWorkDayCount();
+            int weekendDuty = emp.getWeekendDutyCount();
+            int total = emp.getTotalDays();
+            
+            System.out.printf("%02d\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d%n",
+                emp.id, emp.name,
+                counts.get(ShiftType.A), counts.get(ShiftType.D), counts.get(ShiftType.P),
+                workDays,
+                counts.get(ShiftType.PH), counts.get(ShiftType.REST),
+                counts.get(ShiftType.SD), counts.get(ShiftType.SU), counts.get(ShiftType.CR),
+                total);
+        }
+        
+        // 3. 各类班次总计
+        System.out.println("\n三、各类班次总计:");
+        System.out.println("-".repeat(60));
+        
+        Map<ShiftType, Integer> totalCounts = new HashMap<>();
+        for (ShiftType type : ShiftType.values()) {
+            totalCounts.put(type, 0);
+        }
+        
+        for (Employee emp : EMPLOYEES) {
+            for (ShiftType type : ShiftType.values()) {
+                totalCounts.put(type, totalCounts.get(type) + emp.annualCount.get(type));
+            }
+        }
+        
+        for (ShiftType type : ShiftType.values()) {
+            int count = totalCounts.get(type);
+            if (count > 0) {
+                System.out.printf("%s: %d人次\n", getShiftChineseName(type), count);
+            }
+        }
+        
+        // 4. 周末值班总计
+        System.out.println("\n四、周末值班总计:");
+        System.out.println("-".repeat(60));
+        
+        int totalSaturdayDuty = 0;
+        int totalSundayDuty = 0;
+        for (Employee emp : EMPLOYEES) {
+            totalSaturdayDuty += emp.annualCount.get(ShiftType.SD);
+            totalSundayDuty += emp.annualCount.get(ShiftType.SU);
+        }
+        
+        System.out.println("周六值班: " + totalSaturdayDuty + "人次");
+        System.out.println("周日值班: " + totalSundayDuty + "人次");
+        System.out.println("周末值班总计: " + (totalSaturdayDuty + totalSundayDuty) + "人次");
+        
+        // 5. 补休统计
+        System.out.println("\n五、补休统计:");
+        System.out.println("-".repeat(60));
+        
+        int totalCompensatory = 0;
+        for (Employee emp : EMPLOYEES) {
+            totalCompensatory += emp.annualCount.get(ShiftType.CR);
+        }
+        
+        int totalWeekendDuty = totalSaturdayDuty + totalSundayDuty;
+        System.out.println("周末值班次数: " + totalWeekendDuty);
+        System.out.println("补休次数: " + totalCompensatory);
+        double coverage = totalWeekendDuty > 0 ? 
+            (totalCompensatory * 100.0 / totalWeekendDuty) : 0;
+        System.out.printf("补休覆盖率: %.1f%%\n", coverage);
+    }
+    
+    public void printMonthlyOverview() {
+        System.out.println("\n" + "=".repeat(120));
+        System.out.println("月度排班概览");
+        System.out.println("=".repeat(120));
+        
+        DateTimeFormatter monthFormatter = DateTimeFormatter.ofPattern("yyyy年MM月");
+        
+        for (int month = 1; month <= 12; month++) {
+            LocalDate firstDay = LocalDate.of(year, month, 1);
+            int startDay = firstDay.getDayOfYear() - 1;
+            int daysInMonth = firstDay.lengthOfMonth();
+            
+            int monthSaturdayDuty = 0;
+            int monthSundayDuty = 0;
+            int monthWorkDays = 0;
+            
+            for (int day = 0; day < daysInMonth; day++) {
+                int dayOfYear = startDay + day;
+                LocalDate date = LocalDate.of(year, month, day + 1);
+                
+                // 统计周末值班
+                for (int emp = 0; emp < EMPLOYEES.length; emp++) {
+                    if (annualSchedule[emp][dayOfYear] == ShiftType.SD) monthSaturdayDuty++;
+                    if (annualSchedule[emp][dayOfYear] == ShiftType.SU) monthSundayDuty++;
+                }
+                
+                // 统计工作日
+                if (isWorkday(date, dayOfYear)) {
+                    monthWorkDays++;
+                }
+            }
+            
+            System.out.printf("%s: 工作日%d天, 周六值班%d人次, 周日值班%d人次\n",
+                firstDay.format(monthFormatter), monthWorkDays, 
+                monthSaturdayDuty, monthSundayDuty);
+        }
+    }
+    
+    private String getShiftChineseName(ShiftType shift) {
+        switch (shift) {
+            case A: return "早班";
+            case D: return "中班";
+            case P: return "晚班";
+            case PH: return "节假日";
+            case REST: return "周末休息";
+            case SD: return "周六值班";
+            case SU: return "周日值班";
+            case CR: return "补休";
+            default: return shift.name();
+        }
+    }
+    
+    // 辅助类
+    class EmployeeDutyRecord {
+        Employee employee;
+        int totalDuty;
+        
+        EmployeeDutyRecord(Employee employee, int totalDuty) {
+            this.employee = employee;
+            this.totalDuty = totalDuty;
+        }
+        
+        int getTotalDuty() { return totalDuty; }
+        void incrementDuty() { totalDuty++; }
+    }
+    
+    class EmployeeWeekendStats {
+        Employee employee;
+        int saturdayDuty;
+        int sundayDuty;
+        int totalWeekendDuty;
+        
+        EmployeeWeekendStats(Employee emp) {
+            this.employee = emp;
+            this.saturdayDuty = emp.annualCount.get(ShiftType.SD);
+            this.sundayDuty = emp.annualCount.get(ShiftType.SU);
+            this.totalWeekendDuty = saturdayDuty + sundayDuty;
+        }
+        
+        int getTotalWeekendDuty() { return totalWeekendDuty; }
+    }
+    
+    class EmployeeWorkStats {
+        Employee employee;
+        int aDays;
+        int dDays;
+        int pDays;
+        
+        EmployeeWorkStats(Employee emp) {
+            this.employee = emp;
+            this.aDays = emp.annualCount.get(ShiftType.A);
+            this.dDays = emp.annualCount.get(ShiftType.D);
+            this.pDays = emp.annualCount.get(ShiftType.P);
+        }
+        
+        int getTotalWorkDays() { return aDays + dDays + pDays; }
+    }
+}
