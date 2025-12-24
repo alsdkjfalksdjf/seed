@@ -1,0 +1,939 @@
+import java.time.LocalDate;
+import java.time.DayOfWeek;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+// ==================== 基础枚举 ====================
+enum ShiftType {
+    A, D, P,           // 正常工作班次
+    PH,                // 法定节假日
+    REST,              // 周末休息
+    SD,                // 周六值班
+    SU,                // 周日值班
+    CR                 // 补休
+}
+
+// ==================== 员工类 ====================
+class Employee {
+    int id;
+    String name;
+    String shiftPattern;  // 倾向序列，如 "A+D"
+    String[] patternArray;
+    
+    public Employee(int id, String name, String shiftPattern) {
+        this.id = id;
+        this.name = name;
+        this.shiftPattern = shiftPattern;
+        this.patternArray = shiftPattern.split("\\+");
+    }
+    
+    public ShiftType getShiftForWeek(int weekNum) {
+        int index = (weekNum - 1) % patternArray.length;
+        String shiftStr = patternArray[index];
+        
+        switch (shiftStr) {
+            case "A": return ShiftType.A;
+            case "D": return ShiftType.D;
+            case "P": return ShiftType.P;
+            default: return ShiftType.D;
+        }
+    }
+    
+    public boolean hasShiftPreference(ShiftType shift) {
+        for (String s : patternArray) {
+            if (s.equals(shift.name())) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+// ==================== 节假日管理 ====================
+class HolidayManager {
+    private Map<LocalDate, String> holidays = new HashMap<>();
+    
+    public void addHoliday(String name, LocalDate date) {
+        holidays.put(date, name);
+    }
+    
+    public boolean isHoliday(LocalDate date) {
+        return holidays.containsKey(date);
+    }
+    
+    public String getHolidayName(LocalDate date) {
+        return holidays.get(date);
+    }
+}
+
+// ==================== 周末值班历史 ====================
+class WeekendDutyHistory {
+    private Map<Integer, int[]> historyData = new HashMap<>();
+    
+    public void addDutyRecord(int employeeId, boolean isSaturday, int count) {
+        int[] counts = historyData.getOrDefault(employeeId, new int[2]);
+        if (isSaturday) {
+            counts[0] += count;
+        } else {
+            counts[1] += count;
+        }
+        historyData.put(employeeId, counts);
+    }
+    
+    public int getSaturdayDutyCount(int employeeId) {
+        int[] counts = historyData.get(employeeId);
+        return counts != null ? counts[0] : 0;
+    }
+    
+    public int getSundayDutyCount(int employeeId) {
+        int[] counts = historyData.get(employeeId);
+        return counts != null ? counts[1] : 0;
+    }
+    
+    public int getTotalWeekendDuty(int employeeId) {
+        int[] counts = historyData.get(employeeId);
+        return counts != null ? (counts[0] + counts[1]) : 0;
+    }
+    
+    public List<Integer> getEmployeesSortedByDutyCount(boolean ascending) {
+        List<Integer> employeeIds = new ArrayList<>(historyData.keySet());
+        
+        employeeIds.sort((id1, id2) -> {
+            int total1 = getTotalWeekendDuty(id1);
+            int total2 = getTotalWeekendDuty(id2);
+            return ascending ? Integer.compare(total1, total2) : Integer.compare(total2, total1);
+        });
+        
+        return employeeIds;
+    }
+}
+
+// ==================== 固定排班规则管理器 ====================
+class FixedScheduleManager {
+    private Map<Integer, Map<LocalDate, ShiftType>> fixedRules = new HashMap<>();
+    
+    public void addFixedRule(int employeeId, LocalDate date, ShiftType shift) {
+        fixedRules.computeIfAbsent(employeeId, k -> new HashMap<>()).put(date, shift);
+    }
+    
+    public void addWeekdayRule(int employeeId, DayOfWeek weekday, ShiftType shift, 
+                              LocalDate startDate, LocalDate endDate) {
+        LocalDate current = startDate;
+        while (!current.isAfter(endDate)) {
+            if (current.getDayOfWeek() == weekday) {
+                addFixedRule(employeeId, current, shift);
+            }
+            current = current.plusDays(1);
+        }
+    }
+    
+    public ShiftType getFixedShift(int employeeId, LocalDate date) {
+        Map<LocalDate, ShiftType> employeeRules = fixedRules.get(employeeId);
+        return employeeRules != null ? employeeRules.get(date) : null;
+    }
+    
+    public boolean hasFixedRuleOnDate(int employeeId, LocalDate date) {
+        Map<LocalDate, ShiftType> employeeRules = fixedRules.get(employeeId);
+        return employeeRules != null && employeeRules.containsKey(date);
+    }
+    
+    public Map<LocalDate, ShiftType> getFixedRulesForEmployee(int employeeId) {
+        return fixedRules.getOrDefault(employeeId, new HashMap<>());
+    }
+}
+
+// ==================== 排班生成器 ====================
+class ScheduleGenerator {
+    // 配置
+    private List<Employee> employees;
+    private HolidayManager holidayManager;
+    private FixedScheduleManager fixedScheduleManager;
+    private WeekendDutyHistory weekendHistory;
+    
+    // 排班参数
+    private int saturdayDutyRequired = 3;
+    private int sundayDutyRequired = 2;
+    private int minA = 3, maxA = 4;
+    private int minP = 4, maxP = 5;
+    
+    // 排班结果
+    private ShiftType[][] schedule;  // schedule[employeeIndex][dayIndex]
+    private LocalDate[] dates;
+    private int year;
+    private int month;
+    private Random random = new Random(42);
+    
+    public ScheduleGenerator(List<Employee> employees) {
+        this.employees = employees;
+        this.holidayManager = new HolidayManager();
+        this.fixedScheduleManager = new FixedScheduleManager();
+        this.weekendHistory = new WeekendDutyHistory();
+    }
+    
+    public ShiftType[][] generateSchedule(int year, int month) {
+        this.year = year;
+        this.month = month;
+        
+        // 初始化日期数组
+        initializeDates();
+        
+        // 初始化排班表
+        int employeeCount = employees.size();
+        int daysInMonth = dates.length;
+        schedule = new ShiftType[employeeCount][daysInMonth];
+        
+        // 模拟历史值班数据
+        initializeMockHistoryData();
+        
+        // 按步骤生成排班
+        generateScheduleStepByStep();
+        
+        return schedule;
+    }
+    
+    private void initializeDates() {
+        LocalDate firstDay = LocalDate.of(year, month, 1);
+        int daysInMonth = firstDay.lengthOfMonth();
+        dates = new LocalDate[daysInMonth];
+        
+        for (int i = 0; i < daysInMonth; i++) {
+            dates[i] = LocalDate.of(year, month, i + 1);
+        }
+    }
+    
+    private void initializeMockHistoryData() {
+        for (Employee emp : employees) {
+            int saturdayCount = random.nextInt(6);
+            int sundayCount = random.nextInt(5);
+            weekendHistory.addDutyRecord(emp.id, true, saturdayCount);
+            weekendHistory.addDutyRecord(emp.id, false, sundayCount);
+        }
+    }
+    
+    private void generateScheduleStepByStep() {
+        // 步骤1: 设置节假日
+        applyHolidays();
+        
+        // 步骤2: 按周生成常规排班
+        generateWeeklySchedules();
+        
+        // 步骤3: 应用固定排班规则（覆盖常规排班）
+        applyFixedScheduleRules();
+        
+        // 步骤4: 安排周末值班
+        scheduleWeekendDuty();
+        
+        // 步骤5: 填充空白（确保没有空缺）
+        fillEmptyShifts();
+        
+        // 步骤6: 安排补休
+        scheduleCompensatoryRest();
+        
+        // 步骤7: 调整排班以满足人数限制
+        adjustScheduleForConstraints();
+    }
+    
+    private void applyHolidays() {
+        for (int day = 0; day < dates.length; day++) {
+            if (holidayManager.isHoliday(dates[day])) {
+                for (int empIdx = 0; empIdx < employees.size(); empIdx++) {
+                    schedule[empIdx][day] = ShiftType.PH;
+                }
+            }
+        }
+    }
+    
+    private void generateWeeklySchedules() {
+        // 将日期按周分组
+        Map<Integer, List<Integer>> weekMap = new HashMap<>();
+        
+        for (int day = 0; day < dates.length; day++) {
+            LocalDate date = dates[day];
+            
+            // 跳过节假日和周末
+            if (holidayManager.isHoliday(date)) continue;
+            if (date.getDayOfWeek() == DayOfWeek.SATURDAY || date.getDayOfWeek() == DayOfWeek.SUNDAY) {
+                continue;
+            }
+            
+            // 计算周数（从1开始）
+            int weekOfMonth = (date.getDayOfMonth() - 1) / 7 + 1;
+            weekMap.computeIfAbsent(weekOfMonth, k -> new ArrayList<>()).add(day);
+        }
+        
+        // 处理每一周
+        for (Map.Entry<Integer, List<Integer>> entry : weekMap.entrySet()) {
+            int weekNum = entry.getKey();
+            List<Integer> workDays = entry.getValue();
+            
+            if (workDays.isEmpty()) continue;
+            
+            // 为本周生成排班
+            generateWeekSchedule(weekNum, workDays);
+        }
+    }
+    
+    private void generateWeekSchedule(int weekNum, List<Integer> workDays) {
+        int employeeCount = employees.size();
+        
+        // 步骤1: 生成本周基础班次（根据倾向序列）
+        ShiftType[] weekShifts = new ShiftType[employeeCount];
+        for (int i = 0; i < employeeCount; i++) {
+            weekShifts[i] = employees.get(i).getShiftForWeek(weekNum);
+        }
+        
+        // 步骤2: 在偏好A+D的员工中随机选择A班
+        randomizeAPreferences(weekShifts);
+        
+        // 步骤3: 调整班次以满足人数限制
+        adjustWeekSchedule(weekShifts);
+        
+        // 步骤4: 应用本周排班
+        for (int day : workDays) {
+            for (int empIdx = 0; empIdx < employeeCount; empIdx++) {
+                // 只设置没有固定规则的日期
+                if (!fixedScheduleManager.hasFixedRuleOnDate(employees.get(empIdx).id, dates[day])) {
+                    schedule[empIdx][day] = weekShifts[empIdx];
+                }
+            }
+        }
+    }
+    
+    private void randomizeAPreferences(ShiftType[] weekShifts) {
+        // 找出所有偏好A+D的员工
+        List<Integer> adPreferenceEmployees = new ArrayList<>();
+        for (int i = 0; i < employees.size(); i++) {
+            Employee emp = employees.get(i);
+            if (emp.shiftPattern.contains("A") && emp.shiftPattern.contains("D")) {
+                adPreferenceEmployees.add(i);
+            }
+        }
+        
+        // 随机打乱这些员工
+        Collections.shuffle(adPreferenceEmployees, random);
+        
+        // 为这些员工分配A班，但不超过限制
+        int aCount = 0;
+        for (int empIdx : adPreferenceEmployees) {
+            if (weekShifts[empIdx] == ShiftType.A || weekShifts[empIdx] == ShiftType.D) {
+                if (random.nextDouble() < 0.5 && aCount < maxA) {
+                    weekShifts[empIdx] = ShiftType.A;
+                    aCount++;
+                } else {
+                    weekShifts[empIdx] = ShiftType.D;
+                }
+            }
+        }
+    }
+    
+    private void adjustWeekSchedule(ShiftType[] weekShifts) {
+        int maxAttempts = 1000;
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            // 统计各类班次人数
+            int aCount = 0, pCount = 0;
+            for (ShiftType shift : weekShifts) {
+                if (shift == ShiftType.A) aCount++;
+                else if (shift == ShiftType.P) pCount++;
+            }
+            
+            boolean aOk = aCount >= minA && aCount <= maxA;
+            boolean pOk = pCount >= minP && pCount <= maxP;
+            
+            if (aOk && pOk) {
+                return;
+            }
+            
+            // 需要调整
+            if (!aOk) {
+                if (aCount < minA) {
+                    increaseShiftCount(weekShifts, ShiftType.A, minA - aCount);
+                } else if (aCount > maxA) {
+                    decreaseShiftCount(weekShifts, ShiftType.A, aCount - maxA);
+                }
+            }
+            
+            if (!pOk) {
+                if (pCount < minP) {
+                    increaseShiftCount(weekShifts, ShiftType.P, minP - pCount);
+                } else if (pCount > maxP) {
+                    decreaseShiftCount(weekShifts, ShiftType.P, pCount - maxP);
+                }
+            }
+        }
+    }
+    
+    private void increaseShiftCount(ShiftType[] weekShifts, ShiftType targetShift, int needed) {
+        // 找出可以调整为targetShift的员工
+        List<Integer> candidates = new ArrayList<>();
+        for (int i = 0; i < weekShifts.length; i++) {
+            Employee emp = employees.get(i);
+            if (weekShifts[i] != targetShift && emp.hasShiftPreference(targetShift)) {
+                candidates.add(i);
+            }
+        }
+        
+        // 随机选择
+        Collections.shuffle(candidates, random);
+        for (int i = 0; i < Math.min(needed, candidates.size()); i++) {
+            weekShifts[candidates.get(i)] = targetShift;
+        }
+    }
+    
+    private void decreaseShiftCount(ShiftType[] weekShifts, ShiftType targetShift, int excess) {
+        // 找出可以调整出targetShift的员工
+        List<Integer> candidates = new ArrayList<>();
+        for (int i = 0; i < weekShifts.length; i++) {
+            if (weekShifts[i] == targetShift) {
+                candidates.add(i);
+            }
+        }
+        
+        // 随机选择并调整为其他班次
+        Collections.shuffle(candidates, random);
+        for (int i = 0; i < Math.min(excess, candidates.size()); i++) {
+            int empIdx = candidates.get(i);
+            Employee emp = employees.get(empIdx);
+            
+            // 尝试其他班次
+            for (String shiftStr : emp.patternArray) {
+                ShiftType altShift = getShiftTypeFromString(shiftStr);
+                if (altShift != targetShift) {
+                    weekShifts[empIdx] = altShift;
+                    break;
+                }
+            }
+        }
+    }
+    
+    private void applyFixedScheduleRules() {
+        for (int day = 0; day < dates.length; day++) {
+            LocalDate date = dates[day];
+            
+            for (int empIdx = 0; empIdx < employees.size(); empIdx++) {
+                Employee emp = employees.get(empIdx);
+                ShiftType fixedShift = fixedScheduleManager.getFixedShift(emp.id, date);
+                
+                if (fixedShift != null) {
+                    // 固定规则覆盖当天的排班
+                    schedule[empIdx][day] = fixedShift;
+                }
+            }
+        }
+    }
+    
+    private void scheduleWeekendDuty() {
+        // 获取本月的所有周六和周日
+        List<Integer> saturdays = new ArrayList<>();
+        List<Integer> sundays = new ArrayList<>();
+        
+        for (int day = 0; day < dates.length; day++) {
+            LocalDate date = dates[day];
+            if (holidayManager.isHoliday(date)) continue;
+            
+            if (date.getDayOfWeek() == DayOfWeek.SATURDAY) {
+                saturdays.add(day);
+            } else if (date.getDayOfWeek() == DayOfWeek.SUNDAY) {
+                sundays.add(day);
+            }
+        }
+        
+        // 按历史值班总次数排序（值班少的优先）
+        List<Integer> sortedEmployeeIds = weekendHistory.getEmployeesSortedByDutyCount(true);
+        
+        // 处理每个周末
+        for (int saturday : saturdays) {
+            assignSaturdayDuty(saturday, sortedEmployeeIds);
+        }
+        
+        for (int sunday : sundays) {
+            // 找到对应的周六
+            int correspondingSaturday = sunday - 1;
+            
+            // 获取周六已值班的员工
+            Set<Integer> saturdayDutyEmployees = new HashSet<>();
+            if (correspondingSaturday >= 0 && correspondingSaturday < dates.length) {
+                for (int empIdx = 0; empIdx < employees.size(); empIdx++) {
+                    if (schedule[empIdx][correspondingSaturday] == ShiftType.SD) {
+                        saturdayDutyEmployees.add(employees.get(empIdx).id);
+                    }
+                }
+            }
+            
+            // 安排周日值班，排除周六已值班的员工
+            assignSundayDuty(sunday, sortedEmployeeIds, saturdayDutyEmployees);
+        }
+    }
+    
+    private void assignSaturdayDuty(int day, List<Integer> sortedEmployeeIds) {
+        int assigned = 0;
+        
+        for (int employeeId : sortedEmployeeIds) {
+            if (assigned >= saturdayDutyRequired) break;
+            
+            int empIdx = getEmployeeIndex(employeeId);
+            if (empIdx == -1) continue;
+            
+            // 检查该员工这天是否可用
+            if (schedule[empIdx][day] == null) {
+                schedule[empIdx][day] = ShiftType.SD;
+                assigned++;
+            }
+        }
+    }
+    
+    private void assignSundayDuty(int day, List<Integer> sortedEmployeeIds, Set<Integer> excludeEmployeeIds) {
+        int assigned = 0;
+        
+        for (int employeeId : sortedEmployeeIds) {
+            if (assigned >= sundayDutyRequired) break;
+            
+            // 排除周六已值班的员工
+            if (excludeEmployeeIds.contains(employeeId)) {
+                continue;
+            }
+            
+            int empIdx = getEmployeeIndex(employeeId);
+            if (empIdx == -1) continue;
+            
+            // 检查该员工这天是否可用
+            if (schedule[empIdx][day] == null) {
+                schedule[empIdx][day] = ShiftType.SU;
+                assigned++;
+            }
+        }
+    }
+    
+    private void fillEmptyShifts() {
+        for (int day = 0; day < dates.length; day++) {
+            LocalDate date = dates[day];
+            
+            // 跳过节假日
+            if (holidayManager.isHoliday(date)) continue;
+            
+            for (int empIdx = 0; empIdx < employees.size(); empIdx++) {
+                if (schedule[empIdx][day] == null) {
+                    // 如果是周末，安排休息
+                    if (date.getDayOfWeek() == DayOfWeek.SATURDAY || 
+                        date.getDayOfWeek() == DayOfWeek.SUNDAY) {
+                        schedule[empIdx][day] = ShiftType.REST;
+                    } else {
+                        // 工作日，填充D班
+                        schedule[empIdx][day] = ShiftType.D;
+                    }
+                }
+            }
+        }
+    }
+    
+    private void scheduleCompensatoryRest() {
+        for (int empIdx = 0; empIdx < employees.size(); empIdx++) {
+            for (int day = 0; day < dates.length; day++) {
+                if (schedule[empIdx][day] == ShiftType.SD || schedule[empIdx][day] == ShiftType.SU) {
+                    // 查找值班后7天内的工作日安排补休
+                    int compensatoryDay = findCompensatoryDay(empIdx, day + 1, 7);
+                    if (compensatoryDay != -1) {
+                        schedule[empIdx][compensatoryDay] = ShiftType.CR;
+                    }
+                }
+            }
+        }
+    }
+    
+    private int findCompensatoryDay(int empIdx, int startDay, int searchWindow) {
+        for (int offset = 0; offset < searchWindow && (startDay + offset) < dates.length; offset++) {
+            int day = startDay + offset;
+            LocalDate date = dates[day];
+            
+            // 跳过节假日和周末
+            if (holidayManager.isHoliday(date)) continue;
+            if (date.getDayOfWeek() == DayOfWeek.SATURDAY || 
+                date.getDayOfWeek() == DayOfWeek.SUNDAY) {
+                continue;
+            }
+            
+            // 检查该员工这天是否可用
+            if (schedule[empIdx][day] == null || schedule[empIdx][day] == ShiftType.D) {
+                return day;
+            }
+        }
+        return -1;
+    }
+    
+    private void adjustScheduleForConstraints() {
+        int maxAttempts = 1000;
+        int attempts = 0;
+        
+        while (attempts < maxAttempts) {
+            boolean allConstraintsSatisfied = true;
+            
+            for (int day = 0; day < dates.length; day++) {
+                // 跳过节假日、周末
+                if (holidayManager.isHoliday(dates[day])) continue;
+                if (dates[day].getDayOfWeek() == DayOfWeek.SATURDAY || 
+                    dates[day].getDayOfWeek() == DayOfWeek.SUNDAY) {
+                    continue;
+                }
+                
+                if (!checkDailyConstraints(day)) {
+                    allConstraintsSatisfied = false;
+                    adjustDaySchedule(day);
+                }
+            }
+            
+            if (allConstraintsSatisfied) {
+                return;
+            }
+            
+            attempts++;
+        }
+    }
+    
+    private boolean checkDailyConstraints(int day) {
+        int aCount = 0, pCount = 0;
+        
+        for (int empIdx = 0; empIdx < employees.size(); empIdx++) {
+            if (schedule[empIdx][day] == ShiftType.A) aCount++;
+            else if (schedule[empIdx][day] == ShiftType.P) pCount++;
+        }
+        
+        return aCount >= minA && aCount <= maxA &&
+               pCount >= minP && pCount <= maxP;
+    }
+    
+    private void adjustDaySchedule(int day) {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            int empIdx = random.nextInt(employees.size());
+            
+            // 检查该员工是否可以调整
+            if (schedule[empIdx][day] == ShiftType.A || 
+                schedule[empIdx][day] == ShiftType.D || 
+                schedule[empIdx][day] == ShiftType.P) {
+                
+                Employee emp = employees.get(empIdx);
+                String[] pattern = emp.shiftPattern.split("\\+");
+                String newShiftStr = pattern[random.nextInt(pattern.length)];
+                ShiftType newShift = getShiftTypeFromString(newShiftStr);
+                
+                ShiftType oldShift = schedule[empIdx][day];
+                
+                if (oldShift != newShift) {
+                    schedule[empIdx][day] = newShift;
+                    
+                    if (checkDailyConstraints(day)) {
+                        return;
+                    } else {
+                        schedule[empIdx][day] = oldShift;
+                    }
+                }
+            }
+        }
+    }
+    
+    // 辅助方法
+    private ShiftType getShiftTypeFromString(String shiftStr) {
+        switch (shiftStr) {
+            case "A": return ShiftType.A;
+            case "D": return ShiftType.D;
+            case "P": return ShiftType.P;
+            default: return ShiftType.D;
+        }
+    }
+    
+    private int getEmployeeIndex(int employeeId) {
+        for (int i = 0; i < employees.size(); i++) {
+            if (employees.get(i).id == employeeId) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    
+    // 获取器
+    public ShiftType[][] getSchedule() { return schedule; }
+    public LocalDate[] getDates() { return dates; }
+    public List<Employee> getEmployees() { return employees; }
+    public HolidayManager getHolidayManager() { return holidayManager; }
+    public FixedScheduleManager getFixedScheduleManager() { return fixedScheduleManager; }
+    public WeekendDutyHistory getWeekendHistory() { return weekendHistory; }
+}
+
+// ==================== 输出工具 ====================
+class OutputUtils {
+    public static void printLine(String line) {
+        System.out.println(line);
+    }
+    
+    public static void printSeparator(int length) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < length; i++) {
+            sb.append("=");
+        }
+        System.out.println(sb.toString());
+    }
+    
+    public static void printDashLine(int length) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < length; i++) {
+            sb.append("-");
+        }
+        System.out.println(sb.toString());
+    }
+}
+
+// ==================== 主程序 ====================
+public class CompleteSchedulingSystem {
+    
+    public static void main(String[] args) {
+        OutputUtils.printLine("排班系统 v1.0");
+        OutputUtils.printSeparator(60);
+        
+        // 1. 初始化员工
+        List<Employee> employees = createEmployees();
+        
+        // 2. 创建排班生成器
+        ScheduleGenerator generator = new ScheduleGenerator(employees);
+        
+        // 3. 配置节假日
+        configureHolidays(generator);
+        
+        // 4. 配置固定排班规则
+        configureFixedRules(generator);
+        
+        // 5. 生成2026年1月的排班
+        int year = 2026;
+        int month = 1;
+        ShiftType[][] schedule = generator.generateSchedule(year, month);
+        
+        // 6. 检查是否有空缺
+        checkForEmptyShifts(schedule);
+        
+        // 7. 打印排班表
+        printSchedule(schedule, generator, year, month);
+        
+        // 8. 打印周末值班历史
+        printWeekendDutyHistory(generator);
+        
+        // 9. 打印固定规则
+        printFixedRules(generator);
+    }
+    
+    private static List<Employee> createEmployees() {
+        List<Employee> employees = new ArrayList<>();
+        
+        String[] employeeData = {
+            "1,张三,A+D",
+            "2,李四,A+D", 
+            "3,王五,A+D",
+            "4,赵六,D+A",
+            "5,钱七,D",
+            "6,孙八,D+A",
+            "7,周九,D",
+            "8,吴十,D+P",
+            "9,郑十一,P+D+A",
+            "10,王十二,A+P+D",
+            "11,刘十三,D+A",
+            "12,陈十四,D+P+A",
+            "13,杨十五,D+A+P",
+            "14,黄十六,P",
+            "15,朱十七,P"
+        };
+        
+        for (String data : employeeData) {
+            String[] parts = data.split(",");
+            int id = Integer.parseInt(parts[0]);
+            String name = parts[1];
+            String pattern = parts[2];
+            employees.add(new Employee(id, name, pattern));
+        }
+        
+        return employees;
+    }
+    
+    private static void configureHolidays(ScheduleGenerator generator) {
+        HolidayManager holidayManager = generator.getHolidayManager();
+        
+        holidayManager.addHoliday("元旦", LocalDate.of(2026, 1, 1));
+        holidayManager.addHoliday("元旦", LocalDate.of(2026, 1, 2));
+        holidayManager.addHoliday("元旦", LocalDate.of(2026, 1, 3));
+    }
+    
+    private static void configureFixedRules(ScheduleGenerator generator) {
+        FixedScheduleManager fixedManager = generator.getFixedScheduleManager();
+        
+        // 示例1: 张三在每周一固定上A班
+        fixedManager.addWeekdayRule(1, DayOfWeek.MONDAY, ShiftType.A, 
+            LocalDate.of(2026, 1, 1), LocalDate.of(2026, 1, 31));
+        
+        // 示例2: 李四在每周三固定上P班
+        fixedManager.addWeekdayRule(2, DayOfWeek.WEDNESDAY, ShiftType.P,
+            LocalDate.of(2026, 1, 1), LocalDate.of(2026, 1, 31));
+        
+        // 示例3: 王五在1月15日固定休息
+        fixedManager.addFixedRule(3, LocalDate.of(2026, 1, 15), ShiftType.CR);
+        
+        // 示例4: 测试问题 - 一个倾向于P班的员工，设置周一、周二为D班
+        // 假设员工14（黄十六）倾向于P，但设置周一周二为D
+        fixedManager.addWeekdayRule(14, DayOfWeek.MONDAY, ShiftType.D,
+            LocalDate.of(2026, 1, 1), LocalDate.of(2026, 1, 31));
+        fixedManager.addWeekdayRule(14, DayOfWeek.TUESDAY, ShiftType.D,
+            LocalDate.of(2026, 1, 1), LocalDate.of(2026, 1, 31));
+    }
+    
+    private static void checkForEmptyShifts(ShiftType[][] schedule) {
+        int emptyCount = 0;
+        for (int i = 0; i < schedule.length; i++) {
+            for (int j = 0; j < schedule[i].length; j++) {
+                if (schedule[i][j] == null) {
+                    emptyCount++;
+                }
+            }
+        }
+        
+        if (emptyCount > 0) {
+            OutputUtils.printLine("警告：发现 " + emptyCount + " 个空缺排班！");
+        } else {
+            OutputUtils.printLine("✓ 所有排班都已安排，无空缺！");
+        }
+    }
+    
+    private static void printSchedule(ShiftType[][] schedule, ScheduleGenerator generator, 
+                                     int year, int month) {
+        LocalDate[] dates = generator.getDates();
+        List<Employee> employees = generator.getEmployees();
+        HolidayManager holidayManager = generator.getHolidayManager();
+        
+        OutputUtils.printSeparator(150);
+        OutputUtils.printLine(year + "年" + month + "月排班表");
+        OutputUtils.printSeparator(150);
+        
+        // 班次说明
+        OutputUtils.printLine("班次说明:");
+        OutputUtils.printLine("  A - 早班    D - 中班    P - 晚班    PH - 节假日");
+        OutputUtils.printLine("  REST - 周末休息    SD - 周六值班    SU - 周日值班    CR - 补休");
+        OutputUtils.printDashLine(150);
+        
+        // 打印表头
+        System.out.print("编号\t姓名\t倾向\t");
+        for (int day = 0; day < dates.length; day++) {
+            LocalDate date = dates[day];
+            String dayOfWeek = getChineseDayOfWeek(date.getDayOfWeek());
+            
+            if (holidayManager.isHoliday(date)) {
+                System.out.printf("%d日%s*\t", date.getDayOfMonth(), dayOfWeek);
+            } else {
+                System.out.printf("%d日%s\t", date.getDayOfMonth(), dayOfWeek);
+            }
+        }
+        System.out.println();
+        
+        // 打印排班内容
+        for (int empIdx = 0; empIdx < employees.size(); empIdx++) {
+            Employee emp = employees.get(empIdx);
+            System.out.printf("%02d\t%s\t%s\t", emp.id, emp.name, emp.shiftPattern);
+            
+            for (int day = 0; day < dates.length; day++) {
+                ShiftType shift = schedule[empIdx][day];
+                if (shift == null) {
+                    System.out.print("  \t");
+                } else {
+                    System.out.print(getShiftAbbreviation(shift) + "\t");
+                }
+            }
+            System.out.println();
+        }
+        
+        // 打印检查结果
+        OutputUtils.printSeparator(150);
+        OutputUtils.printLine("排班检查结果");
+        OutputUtils.printSeparator(150);
+        
+        // 检查特定员工（黄十六，倾向于P，但设置周一、周二为D）
+        Employee testEmployee = employees.get(13); // 黄十六
+        OutputUtils.printLine("检查员工: " + testEmployee.name + " (倾向: " + testEmployee.shiftPattern + ")");
+        OutputUtils.printDashLine(60);
+        
+        // 检查第一周的排班
+        for (int day = 0; day < 7; day++) { // 第一周
+            LocalDate date = dates[day];
+            if (date.getDayOfWeek() == DayOfWeek.MONDAY || 
+                date.getDayOfWeek() == DayOfWeek.TUESDAY) {
+                OutputUtils.printLine(date.getDayOfMonth() + "日(" + getChineseDayOfWeek(date.getDayOfWeek()) + 
+                    "): " + getShiftAbbreviation(schedule[13][day]) + " (应为D班)");
+            } else if (date.getDayOfWeek().getValue() >= 3 && date.getDayOfWeek().getValue() <= 5) {
+                OutputUtils.printLine(date.getDayOfMonth() + "日(" + getChineseDayOfWeek(date.getDayOfWeek()) + 
+                    "): " + getShiftAbbreviation(schedule[13][day]) + " (应为P班，因为倾向是P)");
+            }
+        }
+    }
+    
+    private static void printWeekendDutyHistory(ScheduleGenerator generator) {
+        OutputUtils.printSeparator(60);
+        OutputUtils.printLine("前6个月周末值班历史");
+        OutputUtils.printSeparator(60);
+        
+        WeekendDutyHistory history = generator.getWeekendHistory();
+        List<Employee> employees = generator.getEmployees();
+        
+        OutputUtils.printLine("员工\t周六值班\t周日值班\t总值班");
+        OutputUtils.printDashLine(40);
+        
+        for (Employee emp : employees) {
+            int satCount = history.getSaturdayDutyCount(emp.id);
+            int sunCount = history.getSundayDutyCount(emp.id);
+            int total = satCount + sunCount;
+            
+            System.out.printf("%s\t%d\t\t%d\t\t%d%n", 
+                emp.name, satCount, sunCount, total);
+        }
+    }
+    
+    private static void printFixedRules(ScheduleGenerator generator) {
+        FixedScheduleManager fixedManager = generator.getFixedScheduleManager();
+        List<Employee> employees = generator.getEmployees();
+        
+        OutputUtils.printSeparator(60);
+        OutputUtils.printLine("固定排班规则");
+        OutputUtils.printSeparator(60);
+        
+        for (Employee emp : employees) {
+            Map<LocalDate, ShiftType> rules = fixedManager.getFixedRulesForEmployee(emp.id);
+            if (!rules.isEmpty()) {
+                OutputUtils.printLine("员工: " + emp.name + " (ID: " + emp.id + ")");
+                for (Map.Entry<LocalDate, ShiftType> entry : rules.entrySet()) {
+                    System.out.printf("  %s: %s%n", 
+                        entry.getKey().format(DateTimeFormatter.ofPattern("yyyy-MM-dd")),
+                        entry.getValue());
+                }
+                OutputUtils.printDashLine(40);
+            }
+        }
+    }
+    
+    private static String getChineseDayOfWeek(DayOfWeek dayOfWeek) {
+        switch (dayOfWeek) {
+            case MONDAY: return "一";
+            case TUESDAY: return "二";
+            case WEDNESDAY: return "三";
+            case THURSDAY: return "四";
+            case FRIDAY: return "五";
+            case SATURDAY: return "六";
+            case SUNDAY: return "日";
+            default: return "";
+        }
+    }
+    
+    private static String getShiftAbbreviation(ShiftType shift) {
+        if (shift == null) return "  ";
+        switch (shift) {
+            case A: return "A";
+            case D: return "D";
+            case P: return "P";
+            case PH: return "PH";
+            case REST: return "休";
+            case SD: return "SD";
+            case SU: return "SU";
+            case CR: return "CR";
+            default: return "  ";
+        }
+    }
+}
